@@ -1,0 +1,158 @@
+---
+- hosts: all
+  tasks:
+   - name: install openstack package
+     apt: name=software-properties-common  state=present
+   - name: add repository
+     apt_repository: repo='deb http://ubuntu-cloud.archive.canonical.com/ubuntu trusty-updates/mitaka main' filename=cloudarchive-mitaka.list state=present
+   - name: update
+     apt:
+      update_cache=yes
+   - name: upgrade
+     apt:
+      upgrade=dist force=yes
+   - name: python installtion
+     apt: name=python-openstackclient  state=present
+     tags: openstack
+
+   - name: database parameters
+     debconf: name='mariadb-server' question='mysql-server/{{ item }}' value='root' vtype='password'
+     with_items:
+        - root-password
+        - root-password-again
+   - name: install mysql
+     apt: name={{item}} state=present
+     with_items:
+        - mariadb-server
+        - python-mysqldb
+     tags: database
+   - name: install rabitmq
+     apt: name=rabbitmq-server state=present
+
+   - name: add users
+     rabbitmq_user:
+       user: murthy
+       password: root
+       permissions:
+         - vhost: /
+           configure_priv: .*
+           read_priv: .*
+           write_priv: .*
+       state: present
+       tags: rabbitmq
+   - name: memcache
+     apt: name={{item}} state=present
+     with_items:
+        - memcached
+        - python-memcache
+     when: ansible_os_family == 'Debian'
+     tags: memcache
+   - name: connect to database
+     mysql_db:
+       login_host: localhost
+       login_user: root
+       login_password: root
+       name: keystone
+       state: present
+
+   - name: localhost keystone user
+     mysql_user:
+       login_host: localhost
+       login_user: root
+       login_password: root
+       name: keystone
+       password: keystone
+       priv: keystone.*:ALL 
+       state: present
+
+   - name: database remote user
+     mysql_user:
+       host: '%' 
+       login_user: root
+       login_password: root
+       name: keystone
+       password: keystone
+       priv: keystone.*:ALL 
+       state: present
+      
+
+   - name: token
+     shell: openssl rand -hex 10 > /root/token
+     tags: token
+
+   - name: keystone service
+     shell: echo "manual" > /etc/init/keystone.override
+     tags: ks
+
+   - name: install keystone package
+     apt: name={{item}} state=latest
+     with_items: 
+       - keystone
+       - apache2
+       - libapache2-mod-wsgi
+     tags: kp
+
+   - name: keystone defaults
+     ini_file: dest=/etc/keystone/keystone.conf
+               section=DEFAULT
+               option=admin_token
+               value=75e59b96d4a1b4c23034
+               backup=yes
+     tags: kd
+
+
+   - name: keystone database
+     ini_file: dest=/etc/keystone/keystone.conf
+               section=database
+               option=connection
+               value=mysql://keystone:keystone@ubuntuansible/keystone
+               backup=yes
+     tags: kdb
+
+   - name: token
+     ini_file: dest=/etc/keystone/keystone.conf
+               section=token
+               option=provider
+               value=fernet
+               backup=yes 
+     tags: t
+
+   - name: create database tables
+     shell: su -s /bin/sh -c "keystone-manage db_sync" keystone
+     tags: dbt
+
+   - name: initialize fernet keys
+     command: keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
+     tags: f
+
+   - name: apache2.conf
+     lineinfile: dest=/etc/apache2/apache2.conf
+                 line='ServerName ubuntuansible'                
+     tags: ac
+
+   - name: create file
+     copy: src=/etc/apache2/sites-available/wsgi-keystone.conf  dest=/etc/ansible/murthy.j2
+     tags: f
+
+
+   - name: enable identity service virtual hosts
+     shell: ln -s /etc/apache2/sites-available/wsgi-keystone.conf /etc/apache2/sites-enabled
+     tags: vh
+
+   - name: apache2 restart
+     service: name=apache2 state=restarted
+     tags: ar
+
+   - name: remove SQL lite database
+     shell: rm -f /var/lib/keystone/keystone.db
+     tags: sldb
+
+   - name: copy export.sh 
+     copy: src=/etc/ansible/export.sh
+           dest=/root/export.sh 
+     tags: e
+
+   - name: replace admin token endpoint url 
+     command: bash export.sh 
+     tags: at
+    
